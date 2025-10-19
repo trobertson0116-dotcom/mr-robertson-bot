@@ -5,8 +5,8 @@ import { google } from "googleapis";
 import fs from "fs";
 import chrono from "chrono-node";
 
-// === CONFIG ===
-const TOKEN = "TU_TOKEN_TELEGRAM_AQUI"; // ⚠️ reemplaza con tu token
+// === CONFIGURACIÓN ===
+const TOKEN = "TU_TOKEN_DE_TELEGRAM_AQUI"; // ⚠️ Reemplázalo por tu token real
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
 const PORT = process.env.PORT || 3000;
 
@@ -25,12 +25,13 @@ try {
   tokens = JSON.parse(fs.readFileSync("token.json"));
   oAuth2Client.setCredentials(tokens);
 } catch {
-  console.log("No se encontró token.json. Ve a /auth para autorizar.");
+  console.log("⚠️ No se encontró token.json. Ve a /auth para autorizar.");
 }
 
 const app = express();
 app.use(bodyParser.json());
 
+// === RUTAS DE AUTENTICACIÓN ===
 app.get("/auth", (req, res) => {
   const authUrl = oAuth2Client.generateAuthUrl({
     access_type: "offline",
@@ -47,7 +48,7 @@ app.get("/oauth2callback", async (req, res) => {
   res.send("✅ Autenticación completada. Ya puedes usar el bot en Telegram.");
 });
 
-// === CALENDAR ===
+// === GOOGLE CALENDAR ===
 const calendar = google.calendar({ version: "v3", auth: oAuth2Client });
 
 async function listarEventos() {
@@ -71,7 +72,7 @@ async function crearEvento(texto) {
   if (!fecha) return "❌ No entendí la fecha u hora del evento.";
 
   const titulo = texto
-    .replace(/crear|agrega|añade|reunión|recordatorio|evento|mañana|hoy|pasado mañana|a las|el|próximo/gi, "")
+    .replace(/crear|agrega|añade|recordatorio|evento|mañana|hoy|pasado mañana|a las|el|próximo/gi, "")
     .trim();
 
   if (!titulo) return "Por favor indica el nombre del evento.";
@@ -106,14 +107,13 @@ async function eliminarEvento(texto) {
   return `🗑️ Evento eliminado: ${encontrado.summary}`;
 }
 
-// === TELEGRAM WEBHOOK ===
+// === WEBHOOK DE TELEGRAM ===
 app.post(`/webhook`, async (req, res) => {
   const msg = req.body.message;
   if (!msg || !msg.text) return res.sendStatus(200);
 
   const chatId = msg.chat.id;
   const text = msg.text.toLowerCase();
-
   let reply = "🤖 No entendí. Puedes decir: 'crear reunión mañana 19 hrs' o 'eventos'.";
 
   if (text.includes("hola")) {
@@ -135,5 +135,4 @@ app.post(`/webhook`, async (req, res) => {
   res.sendStatus(200);
 });
 
-// === SERVIDOR ===
 app.listen(PORT, () => console.log(`🚀 Bot activo en puerto ${PORT}`));
