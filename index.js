@@ -1,138 +1,100 @@
-import express from "express";
-import bodyParser from "body-parser";
-import fetch from "node-fetch";
-import { google } from "googleapis";
-import fs from "fs";
-import chrono from "chrono-node";
+// mr-robertson-bot / index.js
+import TelegramBot from 'node-telegram-bot-api';
+import dotenv from 'dotenv';
+import { google } from 'googleapis';
+import chrono from 'chrono-node';
 
-// === CONFIGURACIÓN ===
-const TOKEN = "TU_TOKEN_DE_TELEGRAM_AQUI"; // ⚠️ Reemplázalo por tu token real
-const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
-const PORT = process.env.PORT || 3000;
+dotenv.config();
 
-// === GOOGLE AUTH ===
-const credentials = JSON.parse(fs.readFileSync("credentials.json"));
-const { client_secret, client_id, redirect_uris } = credentials.web;
+// Variables desde .env
+const token = process.env.TOKEN;
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
+const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN;
 
-const oAuth2Client = new google.auth.OAuth2(
-  client_id,
-  client_secret,
-  redirect_uris[0]
+if (!token) {
+  console.error("❌ Falta el TOKEN del bot. Configura el archivo .env o las variables en Render.");
+  process.exit(1);
+}
+
+const bot = new TelegramBot(token, { polling: true });
+console.log("✅ Mr. Robertson Bot con Google Calendar está activo.");
+
+// --- Configuración de Google Calendar ---
+const oauth2Client = new google.auth.OAuth2(
+  GOOGLE_CLIENT_ID,
+  GOOGLE_CLIENT_SECRET,
+  GOOGLE_REDIRECT_URI
 );
+oauth2Client.setCredentials({ refresh_token: GOOGLE_REFRESH_TOKEN });
+const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
 
-let tokens = null;
-try {
-  tokens = JSON.parse(fs.readFileSync("token.json"));
-  oAuth2Client.setCredentials(tokens);
-} catch {
-  console.log("⚠️ No se encontró token.json. Ve a /auth para autorizar.");
-}
-
-const app = express();
-app.use(bodyParser.json());
-
-// === RUTAS DE AUTENTICACIÓN ===
-app.get("/auth", (req, res) => {
-  const authUrl = oAuth2Client.generateAuthUrl({
-    access_type: "offline",
-    scope: ["https://www.googleapis.com/auth/calendar"],
-  });
-  res.redirect(authUrl);
-});
-
-app.get("/oauth2callback", async (req, res) => {
-  const { code } = req.query;
-  const { tokens } = await oAuth2Client.getToken(code);
-  oAuth2Client.setCredentials(tokens);
-  fs.writeFileSync("token.json", JSON.stringify(tokens));
-  res.send("✅ Autenticación completada. Ya puedes usar el bot en Telegram.");
-});
-
-// === GOOGLE CALENDAR ===
-const calendar = google.calendar({ version: "v3", auth: oAuth2Client });
-
-async function listarEventos() {
-  const res = await calendar.events.list({
-    calendarId: "primary",
-    maxResults: 5,
-    singleEvents: true,
-    orderBy: "startTime",
-  });
-  if (!res.data.items.length) return "📭 No tienes eventos próximos.";
-  return res.data.items
-    .map(e => {
-      const fecha = e.start.dateTime || e.start.date;
-      return `📅 ${e.summary} — ${new Date(fecha).toLocaleString("es-CL")}`;
-    })
-    .join("\n");
-}
-
-async function crearEvento(texto) {
-  const fecha = chrono.parseDate(texto, new Date(), { forwardDate: true });
-  if (!fecha) return "❌ No entendí la fecha u hora del evento.";
-
-  const titulo = texto
-    .replace(/crear|agrega|añade|recordatorio|evento|mañana|hoy|pasado mañana|a las|el|próximo/gi, "")
-    .trim();
-
-  if (!titulo) return "Por favor indica el nombre del evento.";
-
+// --- Funciones ---
+async function addEvent(summary, date) {
   const event = {
-    summary: titulo,
-    start: { dateTime: fecha.toISOString() },
-    end: { dateTime: new Date(fecha.getTime() + 60 * 60 * 1000).toISOString() },
+    summary,
+    start: { dateTime: date.toISOString(), timeZone: 'America/Santiago' },
+    end: { dateTime: new Date(date.getTime() + 60 * 60 * 1000).toISOString(), timeZone: 'America/Santiago' }
   };
-
-  await calendar.events.insert({ calendarId: "primary", resource: event });
-  return `✅ Evento creado: ${titulo} (${fecha.toLocaleString("es-CL")})`;
+  await calendar.events.insert({ calendarId: 'primary', resource: event });
 }
 
-async function eliminarEvento(texto) {
-  const res = await calendar.events.list({ calendarId: "primary" });
-  const eventos = res.data.items;
-  const palabraClave = texto
-    .replace(/eliminar|borra|quita|evento|reunión/gi, "")
-    .trim()
-    .toLowerCase();
-
-  const encontrado = eventos.find(e =>
-    e.summary.toLowerCase().includes(palabraClave)
-  );
-  if (!encontrado) return "❌ No encontré ese evento.";
+async function deleteEvent(keyword) {
+  const res = await calendar.events.list({
+    calendarId: 'primary',
+    q: keyword,
+    maxResults: 5,
+    orderBy: 'startTime',
+    singleEvents: true
+  });
+  const events = res.data.items;
+  if (!events || events.length === 0) return false;
 
   await calendar.events.delete({
-    calendarId: "primary",
-    eventId: encontrado.id,
+    calendarId: 'primary',
+    eventId: events[0].id
   });
-  return `🗑️ Evento eliminado: ${encontrado.summary}`;
+  return true;
 }
 
-// === WEBHOOK DE TELEGRAM ===
-app.post(`/webhook`, async (req, res) => {
-  const msg = req.body.message;
-  if (!msg || !msg.text) return res.sendStatus(200);
-
+// --- Mensajes del bot ---
+bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
-  const text = msg.text.toLowerCase();
-  let reply = "🤖 No entendí. Puedes decir: 'crear reunión mañana 19 hrs' o 'eventos'.";
+  const text = msg.text?.toLowerCase() || '';
 
-  if (text.includes("hola")) {
-    reply = "👋 ¡Hola! Soy Mr. Robertson.\nPuedo crear, listar o eliminar eventos.\nEjemplo: 'crear reunión con Diego mañana 18 hrs'.";
-  } else if (text.includes("eventos") || text.includes("agenda") || text.includes("calendario")) {
-    reply = await listarEventos();
-  } else if (text.match(/crear|agrega|añade|recordatorio|reunión/)) {
-    reply = await crearEvento(text);
-  } else if (text.match(/eliminar|borra|quita/)) {
-    reply = await eliminarEvento(text);
+  try {
+    // Añadir evento
+    if (text.includes('agrega') || text.includes('añade') || text.includes('programa')) {
+      const parsedDate = chrono.parseDate(text, new Date(), { forwardDate: true });
+      if (!parsedDate) return bot.sendMessage(chatId, '❌ No pude entender la fecha/hora.');
+      const eventTitle = text.replace(/(agrega|añade|programa|evento|reunión|recordatorio)/gi, '').trim();
+      await addEvent(eventTitle || 'Evento sin título', parsedDate);
+      return bot.sendMessage(chatId, `✅ Evento creado: "${eventTitle}" el ${parsedDate.toLocaleString()}`);
+    }
+
+    // Eliminar evento
+    if (text.includes('borra') || text.includes('elimina')) {
+      const keyword = text.replace(/(borra|elimina)/gi, '').trim();
+      const deleted = await deleteEvent(keyword);
+      if (deleted) return bot.sendMessage(chatId, `🗑️ Evento "${keyword}" eliminado.`);
+      else return bot.sendMessage(chatId, '⚠️ No encontré ningún evento con ese nombre.');
+    }
+
+    // Ayuda
+    if (text.includes('ayuda')) {
+      return bot.sendMessage(chatId,
+        "👋 Puedo ayudarte con tu calendario:\n\n" +
+        "• Agrega reunión con Ana mañana a las 10\n" +
+        "• Borra evento reunión de hoy\n\n" +
+        "Habla naturalmente conmigo, no hace falta usar comandos."
+      );
+    }
+
+    bot.sendMessage(chatId, 'No entendí bien. Prueba con algo como “Agrega reunión mañana a las 10”.');
+
+  } catch (err) {
+    console.error(err);
+    bot.sendMessage(chatId, '❌ Ocurrió un error al procesar tu solicitud.');
   }
-
-  await fetch(`${TELEGRAM_API}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: reply }),
-  });
-
-  res.sendStatus(200);
 });
-
-app.listen(PORT, () => console.log(`🚀 Bot activo en puerto ${PORT}`));
