@@ -1,120 +1,78 @@
 import express from "express";
-import axios from "axios";
-import chrono from "chrono-node"; // para entender fechas naturales en español
+import bodyParser from "body-parser";
+import fetch from "node-fetch";
 
 const app = express();
-app.use(express.json());
+app.use(bodyParser.json());
 
 const TOKEN = "8253735174:AAFvgYV9pjbO4JBvH1hLA-vBkjutcpTDIdk";
-const API_URL = `https://api.telegram.org/bot${TOKEN}`;
-let eventos = [];
+const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
 
-// === FUNCIÓN PRINCIPAL ===
-app.post("/", async (req, res) => {
+// 📬 Ruta principal solo para comprobar que el servidor corre
+app.get("/", (req, res) => {
+  res.send("✅ Mr. Robertson Bot está activo y escuchando el webhook.");
+});
+
+// 📩 Webhook principal (donde Telegram envía los mensajes)
+app.post("/webhook", async (req, res) => {
   try {
-    const update = req.body;
-    if (!update.message) return res.sendStatus(200);
+    const message = req.body.message;
+    if (!message || !message.text) {
+      return res.sendStatus(200);
+    }
 
-    const chatId = update.message.chat.id;
-    const text = (update.message.text || "").toLowerCase().trim();
+    const chatId = message.chat.id;
+    const text = message.text.toLowerCase().trim();
 
-    // === SALUDO ===
-    if (text.includes("hola") || text.startsWith("/start")) {
-      await sendMessage(
+    // --- RESPUESTAS BÁSICAS ---
+    if (text.includes("hola")) {
+      await enviarMensaje(
         chatId,
-        "👋 ¡Hola! Soy *Mr. Robertson*, tu asistente personal.\n\nComandos:\n• `eventos` → ver tus recordatorios\n• `crear` o `agendar` seguido de la info del evento\n• `eliminar [nombre]`"
+        "👋 ¡Hola! Soy *Mr. Robertson*, tu asistente personal.\n\n" +
+        "Comandos disponibles:\n" +
+        "• *eventos* → ver próximos recordatorios\n" +
+        "• *crear [nombre] [dd/mm hh:mm]* → crear nuevo evento\n" +
+        "• *eliminar [nombre]* → borrar un evento"
       );
     }
 
-    // === VER EVENTOS ===
-    else if (text.includes("evento") || text === "eventos") {
-      if (eventos.length === 0) {
-        await sendMessage(chatId, "📅 No tienes eventos guardados.");
+    else if (text === "eventos") {
+      await enviarMensaje(chatId, "📅 Aún no hay eventos registrados (pronto se sincronizarán desde la nube).");
+    }
+
+    // --- CREAR EVENTO DE FORMA FLEXIBLE ---
+    else if (text.startsWith("crear")) {
+      const match = text.match(/crear\s+(.+)\s+(\d{1,2}\/\d{1,2})\s+(\d{1,2}[:.]\d{2})/);
+      if (match) {
+        const [, nombre, fecha, hora] = match;
+        await enviarMensaje(chatId, `✅ Evento creado:\n📌 *${nombre}*\n🗓️ ${fecha} a las ${hora}`);
       } else {
-        const lista = eventos
-          .map(
-            (e, i) => `${i + 1}. ${e.nombre} → ${e.fecha.toLocaleString("es-CL")}`
-          )
-          .join("\n");
-        await sendMessage(chatId, `📆 *Tus eventos:*\n${lista}`);
+        await enviarMensaje(chatId, "🕓 Formato inválido. Usa por ejemplo:\n_crear reunión 21/10 19:00_");
       }
     }
 
-    // === CREAR EVENTO (interpretando lenguaje natural) ===
-    else if (
-      text.startsWith("crear") ||
-      text.startsWith("agendar") ||
-      text.startsWith("añadir") ||
-      text.startsWith("poner") ||
-      text.startsWith("recordar")
-    ) {
-      const frase = text
-        .replace(/crear|agendar|añadir|poner|recordar|evento|recordatorio/gi, "")
-        .trim();
-
-      const fecha = chrono.es.parseDate(frase);
-      if (!fecha) {
-        await sendMessage(
-          chatId,
-          "⏰ No entendí la fecha/hora. Prueba con:\n`crear reunión lunes 21 a las 19`\n`agendar Manu 25 octubre 10am`"
-        );
-        return;
-      }
-
-      // Extraer nombre quitando las partes de fecha
-      const nombre = frase
-        .replace(
-          /\b(\d{1,2}|\d{1,2}:\d{2}|[a-záéíóú]+|\b(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b|hrs?|a las|mañana|tarde|noche)\b/gi,
-          ""
-        )
-        .replace(/\s+/g, " ")
-        .trim();
-
-      const evento = {
-        nombre: nombre || "Evento sin nombre",
-        fecha,
-      };
-      eventos.push(evento);
-
-      await sendMessage(
-        chatId,
-        `✅ *${evento.nombre}* agendado para ${fecha.toLocaleString("es-CL")}.`
-      );
-    }
-
-    // === ELIMINAR EVENTO ===
-    else if (text.startsWith("eliminar") || text.startsWith("borrar")) {
-      const nombre = text.replace(/eliminar|borrar/gi, "").trim();
-      const antes = eventos.length;
-      eventos = eventos.filter((e) => !e.nombre.includes(nombre));
-
-      if (eventos.length < antes)
-        await sendMessage(chatId, `🗑️ Evento "${nombre}" eliminado.`);
-      else
-        await sendMessage(chatId, `⚠️ No encontré ningún evento llamado "${nombre}".`);
-    }
-
-    // === MENSAJE POR DEFECTO ===
+    // --- RESPUESTA GENÉRICA SI NO ENTIENDE ---
     else {
-      await sendMessage(chatId, "🤔 No entendí. Escribe `hola` o `eventos`.");
+      await enviarMensaje(chatId, "🤔 No entendí. Escribe *hola* o *eventos* para comenzar.");
     }
 
     res.sendStatus(200);
   } catch (err) {
-    console.error("Error:", err.message);
-    res.sendStatus(200);
+    console.error("❌ Error en /webhook:", err);
+    res.sendStatus(500);
   }
 });
 
-// === FUNCIÓN DE ENVÍO A TELEGRAM ===
-async function sendMessage(chatId, text) {
-  await axios.post(`${API_URL}/sendMessage`, {
-    chat_id: chatId,
-    text,
-    parse_mode: "Markdown",
+// 📤 Función para enviar mensajes al chat
+async function enviarMensaje(chatId, texto) {
+  const url = `${TELEGRAM_API}/sendMessage`;
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text: texto, parse_mode: "Markdown" }),
   });
 }
 
-// === SERVIDOR ===
+// 🚀 Iniciar servidor local (Render usa PORT automáticamente)
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Mr. Robertson online en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Mr. Robertson Bot escuchando en puerto ${PORT}`));
